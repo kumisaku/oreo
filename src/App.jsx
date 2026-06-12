@@ -242,6 +242,20 @@ export default function Oreo() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.active]);
 
+  // Auto-refresh prices once on load when holdings exist
+  const didAutoRefresh = useRef(false);
+  useEffect(() => {
+    if (didAutoRefresh.current) return;
+    if (!state) return;
+    const holdings = state.profiles?.find((p) => p.id === state.active)?.data?.holdings || [];
+    if (holdings.length === 0) return;
+    didAutoRefresh.current = true;
+    // Small delay so UI renders first
+    const t = setTimeout(() => refreshPrices(), 800);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state]);
+
   // Apply theme before auth/loading gates so Login and loading screen get correct colors
   applyGlobals(theme === "dark" ? darkTheme : lightTheme, usdIdr, disp, privacy);
 
