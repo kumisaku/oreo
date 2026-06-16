@@ -39,6 +39,8 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
   const [avg, setAvg] = useState(initial?.avg ? String(initial.avg) : "");
   const [totalSpent, setTotalSpent] = useState(initial?.qty && initial?.avg ? String(+(initial.qty * initial.avg).toFixed(2)) : "");
   const [holdLastEdited, setHoldLastEdited] = useState("qty");
+  const platformCcy = (pl) => ["Bybit", "Binance", "Pluang"].includes(pl) ? "USD" : "IDR";
+  const [holdCcy, setHoldCcy] = useState(initial?.ccy || platformCcy(initial?.platform || "Stockbit"));
   const [goalName, setGoalName] = useState(initial?.name || "");
   const [goalTarget, setGoalTarget] = useState(fromIDR(initial?.target));
   const [goalCurrent, setGoalCurrent] = useState(fromIDR(initial?.current));
@@ -102,6 +104,10 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
       else if (holdLastEdited === "qty" && +qty > 0) setTotalSpent(String(+(+qty * +val).toFixed(2)));
     }
   };
+  const onPlatformChange = (pl) => {
+    setPlatform(pl);
+    setHoldCcy(platformCcy(pl));
+  };
 
   const submit = () => {
     if (kind === "txn") {
@@ -122,16 +128,14 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
       onSave({ type: tradeType, qty: +(tradeQty || 0), price: +tradePrice, fees: +(tradeFees || 0), date: tradeDate || todayISO(), note: tradeNote });
     }
     else {
-      if (!ticker || !qty || !avg) return;
+      if (!ticker || !qty) return;
+      const derivedAvg = +avg > 0 ? +avg : (+totalSpent > 0 && +qty > 0 ? +(+totalSpent / +qty).toFixed(holdCcy === "USD" ? 8 : 0) : 0);
+      if (!derivedAvg) return;
       const meta = {
-        Stockbit: { type: "stock",       ccy: "IDR" },
-        Bybit:    { type: "crypto",      ccy: "USD" },
-        Binance:  { type: "crypto",      ccy: "USD" },
-        Pluang:   { type: "stock",       ccy: "USD" },
-        Bibit:    { type: "mutual_fund", ccy: "IDR" },
+        Stockbit: "stock", Bybit: "crypto", Binance: "crypto", Pluang: "stock", Bibit: "mutual_fund",
       };
-      const { type: assetType, ccy } = meta[platform] || { type: "stock", ccy: "IDR" };
-      onSave({ platform, ticker: ticker.toUpperCase(), type: assetType, qty: +qty, avg: +avg, price: +avg, ccy });
+      const assetType = meta[platform] || "stock";
+      onSave({ platform, ticker: ticker.toUpperCase(), type: assetType, qty: +qty, avg: derivedAvg, price: derivedAvg, ccy: holdCcy });
     }
   };
 
@@ -555,23 +559,29 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
                 { pl: "Pluang",   sub: "US stocks · Gold" },
                 { pl: "Bibit",    sub: "Reksa Dana" },
               ].map(({ pl, sub }) => (
-                <button key={pl} onClick={() => setPlatform(pl)} className="lg-btn"
+                <button key={pl} onClick={() => onPlatformChange(pl)} className="lg-btn"
                   style={{ padding: "8px 13px", borderRadius: 11, border: `1px solid ${platform === pl ? T.accent : T.line}`, background: platform === pl ? `${T.accent}1c` : T.panel2, color: platform === pl ? T.accent : T.sub, cursor: "pointer", fontFamily: T.body, textAlign: "left" }}>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>{pl}</div>
                   <div style={{ fontSize: 10.5, opacity: 0.7, marginTop: 1 }}>{sub}</div>
                 </button>
               ))}
             </div>
+            {/* Currency override */}
+            <div style={{ display: "flex", gap: 6 }}>
+              {["IDR", "USD"].map((c) => (
+                <button key={c} onClick={() => setHoldCcy(c)} className="lg-btn"
+                  style={{ flex: 1, padding: "9px", borderRadius: 10, border: `1px solid ${holdCcy === c ? T.accent : T.line}`, background: holdCcy === c ? `${T.accent}14` : T.panel2, color: holdCcy === c ? T.accent : T.sub, fontWeight: 600, fontSize: 13, fontFamily: T.body, cursor: "pointer" }}>
+                  {c === "IDR" ? "Rp — Rupiah" : "$ — Dollar"}
+                </button>
+              ))}
+            </div>
             <input style={inputS}
               placeholder={platform === "Bibit" ? "Fund (e.g. RDPU)" : platform === "Pluang" ? "Ticker (e.g. AAPL, GOLD)" : platform === "Stockbit" ? "Ticker (e.g. BBCA)" : "Ticker (e.g. BTC)"}
               value={ticker} onChange={(e) => setTicker(e.target.value)} />
-            <input style={inputS}
-              placeholder={`Avg / buy price (${["Bybit", "Binance", "Pluang"].includes(platform) ? "USD" : "Rp"})`}
-              inputMode="decimal" value={avg} onChange={(e) => onHoldAvgChange(e.target.value)} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div>
                 <div style={{ fontSize: 10, color: T.faint, letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700, marginBottom: 5 }}>
-                  Total spent ({["Bybit","Binance","Pluang"].includes(platform) ? "USD" : "Rp"})
+                  Total spent ({holdCcy === "USD" ? "USD" : "Rp"})
                 </div>
                 <input style={inputS} placeholder="0" inputMode="decimal" value={totalSpent}
                   onChange={(e) => onHoldTotalChange(e.target.value)} />
@@ -585,13 +595,23 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
                   onChange={(e) => onHoldQtyChange(e.target.value)} />
               </div>
             </div>
+            <div>
+              <div style={{ fontSize: 10, color: T.faint, letterSpacing: 0.5, textTransform: "uppercase", fontWeight: 700, marginBottom: 5, display: "flex", justifyContent: "space-between" }}>
+                <span>Avg / buy price ({holdCcy === "USD" ? "USD" : "Rp"})</span>
+                {!avg && +totalSpent > 0 && +qty > 0 && <span style={{ color: T.accent, textTransform: "none", letterSpacing: 0 }}>auto from total ÷ qty</span>}
+              </div>
+              <input style={inputS} placeholder={`Optional if you filled total + qty`}
+                inputMode="decimal" value={avg} onChange={(e) => onHoldAvgChange(e.target.value)} />
+            </div>
           </>)}
           {kind !== "holdDetail" && (() => {
+            const holdAvgOk = +avg > 0 || (+totalSpent > 0 && +qty > 0);
             const canSave = kind === "txn" ? +amount > 0
               : kind === "sub" ? (!!merchant && +amount > 0)
               : kind === "goal" ? (!!goalName && +goalTarget > 0)
               : kind === "budget" ? (!!cat && +amount > 0)
               : kind === "trade" ? (tradeType === "dividend" ? +tradePrice > 0 : +tradeQty > 0 && +tradePrice > 0)
+              : kind === "hold" ? (!!ticker && +qty > 0 && holdAvgOk)
               : true;
             return (
               <button onClick={submit} disabled={!canSave} className="lg-btn"
