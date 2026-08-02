@@ -183,7 +183,7 @@ export default function ExportModal({ onClose, pdata, profile, accountBalances, 
           const inAmt  = t.type === "income" ? t.amount : 0;
           const outAmt = t.type === "expense" ? t.amount : 0;
           const xfer   = t.type === "transfer" ? t.amount : 0;
-          bal += inAmt - outAmt;
+          bal += inAmt - outAmt - (t.type === "transfer" ? (t.fee || 0) : 0);
           const p = dParts(t.date);
           const row = {
             "No.":         i + 1,
@@ -198,7 +198,7 @@ export default function ExportModal({ onClose, pdata, profile, accountBalances, 
             "Description": t.note || "",
             "Account":     t.acct,
           };
-          if (t.type === "transfer") row["To Account"] = t.toAcct || "";
+          if (t.type === "transfer") { row["To Account"] = t.toAcct || ""; row["Fee (Rp)"] = t.fee ? rnd(t.fee) : ""; }
           if (showIDR) {
             row["Money In (Rp)"]        = inAmt  ? rnd(inAmt)  : "";
             row["Money Out (Rp)"]       = outAmt ? rnd(outAmt) : "";
@@ -320,11 +320,11 @@ export default function ExportModal({ onClose, pdata, profile, accountBalances, 
           "Provider":        a.provider || "",
           "Kind":            a.kind === "asset" ? "Asset" : "Liability",
           "Opening Bal (Rp)":rnd(a.opening || 0),
-          ...(showIDR ? { "Current Balance (Rp)": rnd(a.bal) } : {}),
-          ...(showUSD ? { "Current Balance (USD)": usd2(a.bal / USD_IDR) } : {}),
+          ...(showIDR ? { "Current Balance (Rp)": rnd(a.balance) } : {}),
+          ...(showUSD ? { "Current Balance (USD)": usd2(a.balance / USD_IDR) } : {}),
         }));
-        const totalAssets = (accountBalances || []).filter((a) => a.kind === "asset").reduce((s, a) => s + a.bal, 0);
-        const totalLiab   = (accountBalances || []).filter((a) => a.kind === "liability").reduce((s, a) => s + a.bal, 0);
+        const totalAssets = (accountBalances || []).filter((a) => a.kind === "asset").reduce((s, a) => s + a.balance, 0);
+        const totalLiab   = (accountBalances || []).filter((a) => a.kind === "liability").reduce((s, a) => s + a.balance, 0);
         if (rows.length) {
           const blank = Object.fromEntries(Object.keys(rows[0]).map((k) => [k, ""]));
           rows.push(

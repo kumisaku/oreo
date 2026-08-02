@@ -71,7 +71,7 @@ export function GrowthChart({ data, invested = [], chartId = "main" }) {
   const exp = Math.floor(Math.log10(rough));
   const base = Math.pow(10, exp);
   const step = [1, 2, 5, 10].map((s) => s * base).find((s) => s >= rough) || base;
-  const yMin = Math.max(0, Math.floor(dataMin / step) * step);
+  const yMin = Math.floor(dataMin / step) * step;
   const yMax = Math.ceil(dataMax / step) * step;
   const ticks = []; for (let v = yMin; v <= yMax + step * 0.001; v += step) ticks.push(Math.round(v));
 

@@ -22,7 +22,7 @@ async function fbSave(userId, state) {
 }
 
 export async function loadState(userId) {
-  if (hasFirebase && userId) {
+  if (hasFirebase && userId && !import.meta.env.DEV) {
     try {
       const remote = await fbLoad(userId);
       if (remote) { lsSave(remote); return remote; }
@@ -47,7 +47,7 @@ export async function loadState(userId) {
 
 export async function saveState(state, userId) {
   lsSave(state);
-  if (hasFirebase && userId) {
+  if (hasFirebase && userId && !import.meta.env.DEV) {
     try { await fbSave(userId, state); } catch {}
   }
 }

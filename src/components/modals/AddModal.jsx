@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Plus, ArrowUpRight, ArrowDownRight, ArrowLeftRight } from 'lucide-react';
+import { X, Plus, ArrowUpRight, ArrowDownRight, ArrowLeftRight, Pencil } from 'lucide-react';
 import { T, DISPLAY, USD_IDR } from '../../globals.js';
 import { fmtIDR, fmtUSD, fmtDisp } from '../../utils/format.js';
 import { catColor } from '../../theme.js';
@@ -16,16 +16,20 @@ const fmtAmt   = (val) => {
 };
 import { todayISO, daysFromNow } from '../../seed.js';
 
-export default function AddModal({ kind, accounts, initial, isDesktop, invTxns = [], realizedByHolding = {}, transactions = [], categories = [], onOpenTrade, onClose, onSave, onDelete }) {
+export default function AddModal({ kind, accounts, holdings = [], initial, isDesktop, invTxns = [], realizedByHolding = {}, transactions = [], categories = [], onOpenTrade, onEditTrade, onEditHold, onClose, onSave, onDelete }) {
   const editing = !!initial;
   // All monetary values are stored in IDR — convert to USD when editing in USD mode
   const fromIDR = (n) => n ? (DISPLAY === "USD" ? String(+(n / USD_IDR).toFixed(2)) : String(n)) : "";
+  // For kind="trade" `initial` is the parent holding (logging a new trade against it).
+  // For kind="editTrade" `initial` is the trade itself — resolve its holding via holdingId.
+  const tradeH = kind === "trade" ? initial : kind === "editTrade" ? holdings.find((h) => h.id === initial?.holdingId) : null;
 
   const [type, setType] = useState(initial?.type || "expense");
   const [amount, setAmount] = useState(fromIDR(initial?.amount));
   const [cat, setCat] = useState(initial?.cat || "Food");
   const [acct, setAcct] = useState(initial?.acct || accounts[0]?.name || "");
   const [toAcct, setToAcct] = useState(initial?.toAcct || accounts[1]?.name || "");
+  const [fee, setFee] = useState(fromIDR(initial?.fee));
   const [note, setNote] = useState(initial?.note || "");
   const [date, setDate] = useState(initial?.date || todayISO());
   const [dateMode, setDateMode] = useState(initial && initial.date !== todayISO() ? "custom" : "today");
@@ -41,18 +45,23 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
   const [holdLastEdited, setHoldLastEdited] = useState("qty");
   const platformCcy = (pl) => ["Bybit", "Binance", "Pluang"].includes(pl) ? "USD" : "IDR";
   const [holdCcy, setHoldCcy] = useState(initial?.ccy || platformCcy(initial?.platform || "Stockbit"));
+  const [fundAcct, setFundAcct] = useState(() => {
+    const linkId = (kind === "editTrade" || kind === "hold") ? initial?.fundTxnId : null;
+    return linkId ? (transactions.find((t) => t.id === linkId)?.acct || "") : "";
+  });
   const [goalName, setGoalName] = useState(initial?.name || "");
   const [goalTarget, setGoalTarget] = useState(fromIDR(initial?.target));
   const [goalCurrent, setGoalCurrent] = useState(fromIDR(initial?.current));
   const [goalDeadline, setGoalDeadline] = useState(initial?.deadline || daysFromNow(180));
   const [goalKind, setGoalKind] = useState(initial?.kind || "save");
   const [goalLinks, setGoalLinks] = useState(initial?.linkedAccounts || []);
-  const [tradeType, setTradeType] = useState("buy");
-  const [tradeQty, setTradeQty] = useState("");
-  const [tradePrice, setTradePrice] = useState("");
-  const [tradeFees, setTradeFees] = useState("");
-  const [tradeDate, setTradeDate] = useState(todayISO());
-  const [tradeNote, setTradeNote] = useState("");
+  const isEditTrade = kind === "editTrade";
+  const [tradeType, setTradeType] = useState(isEditTrade && initial ? initial.type : "buy");
+  const [tradeQty, setTradeQty] = useState(isEditTrade && initial ? String(initial.qty || "") : "");
+  const [tradePrice, setTradePrice] = useState(isEditTrade && initial ? String(initial.price || "") : "");
+  const [tradeFees, setTradeFees] = useState(isEditTrade && initial ? String(initial.fees || "") : "");
+  const [tradeDate, setTradeDate] = useState(isEditTrade && initial ? initial.date : todayISO());
+  const [tradeNote, setTradeNote] = useState(isEditTrade && initial ? (initial.note || "") : "");
   const [confirmDel, setConfirmDel] = useState(false);
 
   useEffect(() => {
@@ -69,7 +78,8 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
     goal: editing ? "Edit Goal" : "Add Goal",
     budget: editing ? "Edit Budget" : "Set Budget",
     holdDetail: initial ? `${initial.ticker} · ${initial.platform}` : "Holding",
-    trade: editing ? "Edit Trade" : "Log Trade",
+    trade: "Log Trade",
+    editTrade: "Edit Trade",
   };
   const fieldLabel = { fontSize: 10.5, fontWeight: 700, color: T.faint, letterSpacing: 0.6, textTransform: "uppercase", marginBottom: 5, display: "block" };
 
@@ -114,7 +124,7 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
       if (!amount || +amount <= 0) return;
       if (type === "transfer") {
         if (!acct || !toAcct || acct === toAcct) return;
-        onSave({ type: "transfer", amount: toIDR(amount), cat: "Transfer", acct, toAcct, note: note || `Transfer to ${toAcct}`, date: date || todayISO(), recurring });
+        onSave({ type: "transfer", amount: toIDR(amount), cat: "Transfer", acct, toAcct, fee: toIDR(fee || 0), note: note || `Transfer to ${toAcct}`, date: date || todayISO(), recurring });
       } else {
         onSave({ type, amount: toIDR(amount), cat: cat || (type === "income" ? "Income" : "Expense"), acct, note: note || cat, date: date || todayISO(), recurring });
       }
@@ -122,10 +132,10 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
     else if (kind === "sub") { if (!merchant || !amount || +amount <= 0) return; onSave({ merchant, amount: toIDR(amount), cycle, acct, next: nextRenewal || daysFromNow(30) }); }
     else if (kind === "goal") { if (!goalName || !goalTarget || +goalTarget <= 0) return; onSave({ name: goalName, target: toIDR(goalTarget), current: toIDR(goalCurrent || 0), deadline: goalDeadline || daysFromNow(180), kind: goalKind, linkedAccounts: goalLinks }); }
     else if (kind === "budget") { if (!cat || !amount || +amount <= 0) return; onSave({ cat, monthly: toIDR(amount), id: initial?.id || "b" + Date.now() }); }
-    else if (kind === "trade") {
+    else if (kind === "trade" || kind === "editTrade") {
       if (tradeType !== "dividend" && (!tradeQty || +tradeQty <= 0 || !tradePrice || +tradePrice <= 0)) return;
       if (tradeType === "dividend" && (!tradePrice || +tradePrice <= 0)) return;
-      onSave({ type: tradeType, qty: +(tradeQty || 0), price: +tradePrice, fees: +(tradeFees || 0), date: tradeDate || todayISO(), note: tradeNote });
+      onSave({ type: tradeType, qty: +(tradeQty || 0), price: +tradePrice, fees: +(tradeFees || 0), date: tradeDate || todayISO(), note: tradeNote, fundAcct: tradeType === "buy" ? (fundAcct || null) : null });
     }
     else {
       if (!ticker || !qty) return;
@@ -134,8 +144,13 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
       const meta = {
         Stockbit: "stock", Bybit: "crypto", Binance: "crypto", Pluang: "stock", Bibit: "mutual_fund",
       };
-      const assetType = meta[platform] || "stock";
-      onSave({ platform, ticker: ticker.toUpperCase(), type: assetType, qty: +qty, avg: derivedAvg, price: derivedAvg, ccy: holdCcy });
+      // Pluang lists US stocks, crypto, and gold on the same platform — infer from the ticker itself
+      const CRYPTO_TICKERS = new Set(["BTC", "ETH", "BNB", "SOL", "MATIC", "ADA", "DOT", "AVAX", "LINK", "UNI", "XRP", "DOGE", "SHIB", "LTC", "ATOM", "NEAR", "ARB", "OP", "SUI", "TON"]);
+      const upperTicker = ticker.toUpperCase();
+      const assetType = platform === "Pluang"
+        ? (upperTicker === "GOLD" ? "gold" : CRYPTO_TICKERS.has(upperTicker) ? "crypto" : "stock")
+        : meta[platform] || "stock";
+      onSave({ platform, ticker: ticker.toUpperCase(), type: assetType, qty: +qty, avg: derivedAvg, price: derivedAvg, ccy: holdCcy, fundAcct: fundAcct || null });
     }
   };
 
@@ -265,7 +280,7 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
             )}
 
             {/* Account */}
-            {type === "transfer" ? (
+            {type === "transfer" ? (<>
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ flex: 1 }}>
                   <div style={fieldLabel}>From</div>
@@ -276,7 +291,11 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
                   <select style={inputS} value={toAcct} onChange={(e) => setToAcct(e.target.value)}>{accounts.map((a) => <option key={a.id} style={{ background: T.panelSolid }}>{a.name}</option>)}</select>
                 </div>
               </div>
-            ) : (
+              <div>
+                <div style={fieldLabel}>Fee (optional)</div>
+                <input style={inputS} placeholder={DISPLAY === "USD" ? "$ 0" : "Rp 0"} inputMode={DISPLAY === "USD" ? "decimal" : "numeric"} value={fmtAmt(fee)} onChange={(e) => setFee(parseAmt(e.target.value))} />
+              </div>
+            </>) : (
               <div>
                 <div style={fieldLabel}>Account</div>
                 <select style={inputS} value={acct} onChange={(e) => setAcct(e.target.value)}>{accounts.map((a) => <option key={a.id} style={{ background: T.panelSolid }}>{a.name}</option>)}</select>
@@ -453,6 +472,10 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
                     </div>
                     <div style={{ fontSize: 11.5, color: T.faint, marginTop: 2 }}>{h.platform} · {h.qty} units @ {h.ccy === "USD" ? fmtUSD(h.avg) : fmtIDR(h.avg)}</div>
                   </div>
+                  <button onClick={() => onEditHold && onEditHold(h)} className="lg-btn" title="Edit holding"
+                    style={{ background: T.panelSolid, border: `1px solid ${T.line}`, borderRadius: 9, padding: 7, cursor: "pointer", color: T.sub, display: "grid", placeItems: "center", flexShrink: 0 }}>
+                    <Pencil size={14} />
+                  </button>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 16 }}>
                   {[
@@ -481,7 +504,8 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
                     {hTrades.map((it, idx) => {
                       const itCol = it.type === "buy" ? T.greenDeep : it.type === "sell" ? T.red : T.accent;
                       return (
-                        <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: idx < hTrades.length - 1 ? `1px solid ${T.line}` : "none" }}>
+                        <div key={it.id} onClick={() => onEditTrade && onEditTrade(it)} className="lg-row"
+                          style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 14px", borderBottom: idx < hTrades.length - 1 ? `1px solid ${T.line}` : "none", cursor: onEditTrade ? "pointer" : "default" }}>
                           <div style={{ width: 28, height: 28, borderRadius: 8, background: `${itCol}18`, display: "grid", placeItems: "center", flexShrink: 0 }}>
                             {it.type === "buy" ? <ArrowUpRight size={13} color={itCol} /> : it.type === "sell" ? <ArrowDownRight size={13} color={itCol} /> : <span style={{ fontSize: 10, fontWeight: 800, color: itCol }}>D</span>}
                           </div>
@@ -504,30 +528,40 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
             </>);
           })()}
 
-          {kind === "trade" && (<>
+          {(kind === "trade" || kind === "editTrade") && (<>
             <div style={{ fontSize: 11, color: T.faint, marginTop: -4, marginBottom: 4, fontFamily: T.mono }}>
-              {initial ? `${initial.ticker} · ${initial.platform} · ${initial.qty} held @ avg ${initial.ccy === "USD" ? fmtUSD(initial.avg) : fmtIDR(initial.avg)}` : ""}
+              {tradeH ? `${tradeH.ticker} · ${tradeH.platform} · ${tradeH.qty} held @ avg ${tradeH.ccy === "USD" ? fmtUSD(tradeH.avg) : fmtIDR(tradeH.avg)}` : ""}
             </div>
             <div style={{ display: "flex", gap: 7 }}>
               {[{ k: "buy", l: "Buy" }, { k: "sell", l: "Sell" }, { k: "dividend", l: "Dividend" }].map(({ k, l }) => (
-                <button key={k} onClick={() => setTradeType(k)} className="lg-btn"
-                  style={{ flex: 1, padding: "10px", borderRadius: 11, border: `1px solid ${tradeType === k ? T.accent : T.line}`, background: tradeType === k ? `${T.accent}1c` : T.panel2, color: tradeType === k ? T.accent : T.sub, cursor: "pointer", fontWeight: 700, fontSize: 13, fontFamily: T.body }}>{l}</button>
+                <button key={k} onClick={() => !isEditTrade && setTradeType(k)} disabled={isEditTrade} className="lg-btn"
+                  style={{ flex: 1, padding: "10px", borderRadius: 11, border: `1px solid ${tradeType === k ? T.accent : T.line}`, background: tradeType === k ? `${T.accent}1c` : T.panel2, color: tradeType === k ? T.accent : T.sub, cursor: isEditTrade ? "not-allowed" : "pointer", opacity: isEditTrade && tradeType !== k ? 0.5 : 1, fontWeight: 700, fontSize: 13, fontFamily: T.body }}>{l}</button>
               ))}
             </div>
             {tradeType !== "dividend" && (
               <div>
-                <div style={fieldLabel}>{tradeType === "buy" ? "Quantity" : `Quantity to sell`}{initial && tradeType === "sell" ? ` (max ${initial.qty})` : ""}</div>
+                <div style={fieldLabel}>{tradeType === "buy" ? "Quantity" : `Quantity to sell`}{tradeH && tradeType === "sell" ? ` (max ${isEditTrade ? tradeH.qty + (initial?.qty || 0) : tradeH.qty})` : ""}</div>
                 <input style={inputS} placeholder="0" inputMode="decimal" value={tradeQty} onChange={(e) => setTradeQty(e.target.value)} />
               </div>
             )}
             <div>
               <div style={fieldLabel}>{tradeType === "dividend" ? "Dividend amount" : "Price per unit"}</div>
-              <input style={inputS} placeholder={initial?.ccy === "USD" ? "$0.00" : "Rp 0"} inputMode="decimal" value={tradePrice} onChange={(e) => setTradePrice(e.target.value)} />
+              <input style={inputS} placeholder={tradeH?.ccy === "USD" ? "$0.00" : "Rp 0"} inputMode="decimal" value={tradePrice} onChange={(e) => setTradePrice(e.target.value)} />
             </div>
             {tradeType !== "dividend" && (
               <div>
                 <div style={fieldLabel}>Fees (optional)</div>
                 <input style={inputS} placeholder="Rp 0" inputMode="decimal" value={tradeFees} onChange={(e) => setTradeFees(e.target.value)} />
+              </div>
+            )}
+            {tradeType === "buy" && (
+              <div>
+                <div style={fieldLabel}>Funding account (optional)</div>
+                <select style={inputS} value={fundAcct} onChange={(e) => setFundAcct(e.target.value)}>
+                  <option value="" style={{ background: T.panelSolid }}>— none, don't deduct —</option>
+                  {accounts.map((a) => <option key={a.id} style={{ background: T.panelSolid }}>{a.name}</option>)}
+                </select>
+                <div style={{ fontSize: 10.5, color: T.faint, marginTop: 5 }}>If set, the cost is deducted from this account as an expense.</div>
               </div>
             )}
             <div style={{ height: 1, background: T.line, margin: "4px 0" }} />
@@ -539,12 +573,12 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
               <div style={fieldLabel}>Note (optional)</div>
               <input style={inputS} placeholder="e.g. DCA buy, stop-loss hit…" value={tradeNote} onChange={(e) => setTradeNote(e.target.value)} />
             </div>
-            {tradeType === "sell" && tradeQty && tradePrice && initial && (
+            {tradeType === "sell" && tradeQty && tradePrice && tradeH && (
               <div style={{ background: T.panel2, borderRadius: 11, padding: "10px 14px", fontSize: 12.5, fontFamily: T.mono }}>
                 <div style={{ color: T.sub, marginBottom: 3 }}>Estimated realized P&L</div>
                 {(() => {
-                  const realized = +tradeQty * (+tradePrice - initial.avg) - +(tradeFees || 0);
-                  return <div style={{ fontWeight: 700, color: realized >= 0 ? T.greenDeep : T.red, fontSize: 14 }}>{realized >= 0 ? "+" : ""}{initial.ccy === "USD" ? fmtUSD(realized) : fmtIDR(realized)}</div>;
+                  const realized = +tradeQty * (+tradePrice - tradeH.avg) - +(tradeFees || 0);
+                  return <div style={{ fontWeight: 700, color: realized >= 0 ? T.greenDeep : T.red, fontSize: 14 }}>{realized >= 0 ? "+" : ""}{tradeH.ccy === "USD" ? fmtUSD(realized) : fmtIDR(realized)}</div>;
                 })()}
               </div>
             )}
@@ -556,7 +590,7 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
                 { pl: "Stockbit", sub: "IDX stocks" },
                 { pl: "Bybit",    sub: "Crypto" },
                 { pl: "Binance",  sub: "Crypto" },
-                { pl: "Pluang",   sub: "US stocks · Gold" },
+                { pl: "Pluang",   sub: "US stocks · Crypto · Gold" },
                 { pl: "Bibit",    sub: "Reksa Dana" },
               ].map(({ pl, sub }) => (
                 <button key={pl} onClick={() => onPlatformChange(pl)} className="lg-btn"
@@ -571,12 +605,12 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
               {["IDR", "USD"].map((c) => (
                 <button key={c} onClick={() => setHoldCcy(c)} className="lg-btn"
                   style={{ flex: 1, padding: "9px", borderRadius: 10, border: `1px solid ${holdCcy === c ? T.accent : T.line}`, background: holdCcy === c ? `${T.accent}14` : T.panel2, color: holdCcy === c ? T.accent : T.sub, fontWeight: 600, fontSize: 13, fontFamily: T.body, cursor: "pointer" }}>
-                  {c === "IDR" ? "Rp — Rupiah" : "$ — Dollar"}
+                  {c === "IDR" ? "IDR — Rupiah" : "USD — Dollar"}
                 </button>
               ))}
             </div>
             <input style={inputS}
-              placeholder={platform === "Bibit" ? "Fund (e.g. RDPU)" : platform === "Pluang" ? "Ticker (e.g. AAPL, GOLD)" : platform === "Stockbit" ? "Ticker (e.g. BBCA)" : "Ticker (e.g. BTC)"}
+              placeholder={platform === "Bibit" ? "Fund (e.g. RDPU)" : platform === "Pluang" ? "Ticker (e.g. AAPL, BTC, GOLD)" : platform === "Stockbit" ? "Ticker (e.g. BBCA)" : "Ticker (e.g. BTC)"}
               value={ticker} onChange={(e) => setTicker(e.target.value)} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div>
@@ -603,6 +637,14 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
               <input style={inputS} placeholder={`Optional if you filled total + qty`}
                 inputMode="decimal" value={avg} onChange={(e) => onHoldAvgChange(e.target.value)} />
             </div>
+            <div>
+              <div style={fieldLabel}>Funding account (optional)</div>
+              <select style={inputS} value={fundAcct} onChange={(e) => setFundAcct(e.target.value)}>
+                <option value="" style={{ background: T.panelSolid }}>— none, don't deduct —</option>
+                {accounts.map((a) => <option key={a.id} style={{ background: T.panelSolid }}>{a.name}</option>)}
+              </select>
+              <div style={{ fontSize: 10.5, color: T.faint, marginTop: 5 }}>If set, the cost is deducted from this account as an expense.</div>
+            </div>
           </>)}
           {kind !== "holdDetail" && (() => {
             const holdAvgOk = +avg > 0 || (+totalSpent > 0 && +qty > 0);
@@ -610,13 +652,13 @@ export default function AddModal({ kind, accounts, initial, isDesktop, invTxns =
               : kind === "sub" ? (!!merchant && +amount > 0)
               : kind === "goal" ? (!!goalName && +goalTarget > 0)
               : kind === "budget" ? (!!cat && +amount > 0)
-              : kind === "trade" ? (tradeType === "dividend" ? +tradePrice > 0 : +tradeQty > 0 && +tradePrice > 0)
+              : (kind === "trade" || kind === "editTrade") ? (tradeType === "dividend" ? +tradePrice > 0 : +tradeQty > 0 && +tradePrice > 0)
               : kind === "hold" ? (!!ticker && +qty > 0 && holdAvgOk)
               : true;
             return (
               <button onClick={submit} disabled={!canSave} className="lg-btn"
                 style={{ marginTop: 4, padding: "14px", borderRadius: 12, background: canSave ? T.accent : T.panel2, border: canSave ? "none" : `1px solid ${T.line}`, color: canSave ? "#ffffff" : T.faint, fontWeight: 700, fontSize: 14.5, cursor: canSave ? "pointer" : "not-allowed", fontFamily: T.body, transition: "all .15s ease", display: "flex", alignItems: "center", justifyContent: "center", gap: 10, boxShadow: canSave ? `0 4px 16px ${T.accent}50` : "none" }}>
-                <span>{kind === "trade" ? "Log trade" : editing ? "Save changes" : "Save"}</span>
+                <span>{kind === "trade" ? "Log trade" : kind === "editTrade" ? "Save changes" : editing ? "Save changes" : "Save"}</span>
                 {canSave && isDesktop && <kbd style={{ fontSize: 10.5, opacity: 0.6, background: "rgba(255,255,255,0.15)", borderRadius: 5, padding: "2px 6px", fontFamily: T.mono }}>⌘↵</kbd>}
               </button>
             );

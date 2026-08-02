@@ -91,6 +91,7 @@ export default function Oreo() {
 
   // Auth listener — runs once, keeps user in sync
   useEffect(() => {
+    if (import.meta.env.DEV) { setUser({ uid: 'local-dev', displayName: 'Local Dev', email: 'dev@localhost', photoURL: null }); return; }
     if (!hasFirebase) { setUser(null); return; }
     const unsub = onAuthStateChanged(auth, (fbUser) => setUser(fbUser ?? null));
     return unsub;
@@ -121,31 +122,34 @@ export default function Oreo() {
     if (changed) setState((s) => ({ ...s, data: newData }));
   }, [state?.active]);
 
-  // Real-time USD/IDR rate — refreshes every hour
+  // Real-time USD/IDR rate — refreshes every 5 minutes
+  const CCY_CACHE_KEY = "oreo:usdIdr:v2"; // v2 busts old stale caches
+  const refreshCurrency = async () => {
+    try {
+      const res = await fetch("https://api.frankfurter.dev/v1/latest?from=USD&to=IDR");
+      const data = await res.json();
+      const rate = Math.round(data.rates.IDR);
+      if (rate > 10000) {
+        const ts = Date.now();
+        setUsdIdr(rate);
+        setRateTs(ts);
+        localStorage.setItem(CCY_CACHE_KEY, JSON.stringify({ rate, ts }));
+      }
+    } catch (_) {}
+  };
   useEffect(() => {
-    const CACHE_KEY = "oreo:usdIdr:v2"; // v2 busts old stale caches
-    const HOUR = 60 * 60 * 1000;
+    const REFRESH_INTERVAL = 5 * 60 * 1000;
     const fetchRate = async () => {
-      try {
-        const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
-        if (cached && cached.rate > 10000 && cached.rate !== 16250 && Date.now() - cached.ts < HOUR) {
-          setUsdIdr(cached.rate);
-          setRateTs(cached.ts);
-          return;
-        }
-        const res = await fetch("https://api.frankfurter.app/latest?from=USD&to=IDR");
-        const data = await res.json();
-        const rate = Math.round(data.rates.IDR);
-        if (rate > 10000) {
-          const ts = Date.now();
-          setUsdIdr(rate);
-          setRateTs(ts);
-          localStorage.setItem(CACHE_KEY, JSON.stringify({ rate, ts }));
-        }
-      } catch (_) {}
+      const cached = JSON.parse(localStorage.getItem(CCY_CACHE_KEY) || "null");
+      if (cached && cached.rate > 10000 && cached.rate !== 16250 && Date.now() - cached.ts < REFRESH_INTERVAL) {
+        setUsdIdr(cached.rate);
+        setRateTs(cached.ts);
+        return;
+      }
+      refreshCurrency();
     };
     fetchRate();
-    const interval = setInterval(fetchRate, HOUR);
+    const interval = setInterval(fetchRate, REFRESH_INTERVAL);
     return () => clearInterval(interval);
   }, []);
   useEffect(() => {
@@ -251,7 +255,7 @@ export default function Oreo() {
     if (holdings.length === 0) return;
     didAutoRefresh.current = true;
     // Small delay so UI renders first
-    const t = setTimeout(() => refreshPrices(), 800);
+    const t = setTimeout(() => refreshAll(), 800);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
@@ -297,6 +301,24 @@ export default function Oreo() {
     // Include stored history months that have no transactions (historical seed data)
     (pdata.history || []).forEach((h) => { if (!map[h.m]) map[h.m] = h; });
     return Object.values(map).sort((a, b) => a.m.localeCompare(b.m));
+  })();
+
+  // Day-level net cash flow — anchors the net worth growth chart at the exact
+  // date of each transaction, so today's entries show up immediately instead
+  // of being smoothed across the whole month (liveHistory buckets by month).
+  // Excludes "Investment" funding expenses: buying a holding just moves cash
+  // into invValue at roughly the same worth, so counting the cash leaving here
+  // (without also adding back the value gained) would show a fake dip.
+  const dailyNetHistory = (() => {
+    const map = {};
+    (pdata.transactions || []).forEach((t) => {
+      if (!t.date || t.type === "transfer") return;
+      if (t.type === "expense" && t.cat === "Investment") return;
+      if (!map[t.date]) map[t.date] = { date: t.date, income: 0, expense: 0 };
+      if (t.type === "income") map[t.date].income += t.amount;
+      else if (t.type === "expense") map[t.date].expense += t.amount;
+    });
+    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
   })();
 
   // Unified range bounds — chartRange drives BOTH stats and charts
@@ -359,7 +381,7 @@ export default function Oreo() {
       if (t.type === "income" && t.acct === a.name) bal += t.amount;
       else if (t.type === "expense" && t.acct === a.name) bal -= t.amount;
       else if (t.type === "transfer") {
-        if (t.acct === a.name) bal -= t.amount;
+        if (t.acct === a.name) bal -= t.amount + (t.fee || 0);
         if (t.toAcct === a.name) bal += t.amount;
       }
     });
@@ -916,10 +938,11 @@ export default function Oreo() {
     return `${mon} '${d.getFullYear().toString().slice(2)}`;
   };
 
-  // Absolute net worth for every month in full history (true values, not reset-cumulative)
-  const fullNwTrend = liveHistory.map((_, i, arr) => {
+  // Absolute net worth for every day with activity (true values, not reset-cumulative)
+  const dailyCumNet = dailyNetHistory.reduce((a, b) => a + (b.income - b.expense), 0);
+  const fullNwTrend = dailyNetHistory.map((_, i, arr) => {
     const cumUpToI = arr.slice(0, i + 1).reduce((a, b) => a + (b.income - b.expense), 0);
-    return netWorth - (totalCumNet - cumUpToI);
+    return netWorth - (dailyCumNet - cumUpToI);
   });
 
   // Slice-based history filter so range labels always show sensible point counts
@@ -954,17 +977,17 @@ export default function Oreo() {
   };
   const fullDate = (ms) => new Date(ms).toLocaleString("en", { month: "short", day: "numeric", year: "numeric" });
 
-  // Interpolate net worth along the real monthly trend (+ today anchor) for any date
-  const nwAnchors = liveHistory.map((h, i) => ({ t: new Date(h.date + "T00:00:00").getTime(), v: fullNwTrend[i] }));
+  // Interpolate net worth along the real day-by-day trend (+ today anchor) for any date
+  const nwAnchors = dailyNetHistory.map((h, i) => ({ t: new Date(h.date + "T00:00:00").getTime(), v: fullNwTrend[i] }));
   nwAnchors.push({ t: nowMs, v: netWorth });
+  // Step-hold, not ramp: net worth is flat between transactions and jumps exactly
+  // on the day it happened — a straight ramp across a gap with no activity implies
+  // gradual growth that never actually occurred.
   const interpNW = (ms) => {
     if (ms <= nwAnchors[0].t) return nwAnchors[0].v;
     if (ms >= nwAnchors[nwAnchors.length - 1].t) return nwAnchors[nwAnchors.length - 1].v;
     for (let i = 1; i < nwAnchors.length; i++) {
-      if (ms <= nwAnchors[i].t) {
-        const a = nwAnchors[i - 1], b = nwAnchors[i];
-        return a.v + (b.v - a.v) * ((ms - a.t) / (b.t - a.t));
-      }
+      if (ms < nwAnchors[i].t) return nwAnchors[i - 1].v;
     }
     return nwAnchors[nwAnchors.length - 1].v;
   };
@@ -976,7 +999,7 @@ export default function Oreo() {
     for (let k = nPts - 1; k >= 0; k--) {
       const ms = endMs - k * ptInterval * 864e5;
       const base = interpNW(ms);
-      out.push({ ms, label: axisLabel(ms), full: fullDate(ms), value: Math.max(0, Math.round(base)) });
+      out.push({ ms, label: axisLabel(ms), full: fullDate(ms), value: Math.round(base) });
     }
     return out;
   })();
@@ -1653,27 +1676,22 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
 
         {/* Compact hero strip — net worth + 3 stats in one row */}
         <Card style={{ padding: "14px 20px", marginBottom: 10 }} className="lg-rise">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 0, alignItems: "center" }}>
-            {/* Net worth */}
-            <div style={{ paddingRight: 24, borderRight: `1px solid ${T.line}` }}>
-              <div style={{ fontSize: 10, color: T.faint, letterSpacing: 0.6, textTransform: "uppercase", fontWeight: 700, marginBottom: 4 }}>Net worth · {rangeBounds.label}</div>
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 12 }}>
-                <div style={{ fontFamily: T.display, fontSize: 38, fontWeight: 800, letterSpacing: -1.2, lineHeight: 1, color: T.ink }}>{fmtDisp(netWorth)}</div>
-                <div style={{ paddingBottom: 2 }}>{nwTrend.length >= 3 && <Sparkline points={nwTrend} color={T.gold} w={90} />}</div>
-              </div>
-            </div>
-            {/* Revenue / Expenses / Profit inline */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 0, alignItems: "center" }}>
             {[
+              { l: `Net worth · ${rangeBounds.label}`, v: netWorth, c: T.ink, icon: <TrendingUp size={12} />, sparkline: true },
               { l: "Revenue", v: revenue, c: T.greenDeep, icon: <ArrowUpRight size={12} /> },
               { l: "Expenses", v: expense, c: T.red, icon: <ArrowDownRight size={12} /> },
               { l: "Cash flow", v: profit, c: profit >= 0 ? T.greenDeep : T.red, icon: <TrendingUp size={12} /> },
             ].map((x, i) => (
-              <div key={x.l} style={{ paddingLeft: 20, paddingRight: i < 2 ? 20 : 0, borderRight: i < 2 ? `1px solid ${T.line}` : "none" }}>
+              <div key={x.l} style={{ paddingLeft: i > 0 ? 20 : 0, paddingRight: i < 3 ? 20 : 0, borderRight: i < 3 ? `1px solid ${T.line}` : "none" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 5 }}>
                   <div style={{ width: 20, height: 20, borderRadius: 6, background: `${x.c}18`, display: "grid", placeItems: "center", color: x.c }}>{x.icon}</div>
                   <span style={{ fontSize: 10, color: T.faint, letterSpacing: 0.4, textTransform: "uppercase", fontWeight: 700 }}>{x.l}</span>
                 </div>
-                <div style={{ fontFamily: T.display, fontSize: 20, fontWeight: 800, letterSpacing: -0.4, color: x.l === "Cash flow" ? x.c : T.ink }}>{fmtCompact(x.v)}</div>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+                  <div style={{ fontFamily: T.display, fontSize: 20, fontWeight: 800, letterSpacing: -0.4, color: i === 3 ? x.c : T.ink }}>{fmtCompact(x.v)}</div>
+                  {x.sparkline && nwTrend.length >= 3 && <div style={{ paddingBottom: 2 }}><Sparkline points={nwTrend} color={T.gold} w={60} /></div>}
+                </div>
               </div>
             ))}
           </div>
@@ -2184,8 +2202,9 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
     </div>
   );
 
-  const refreshPrices = async () => {
+  const refreshAll = async () => {
     setPriceLoading(true);
+    await refreshCurrency();
     const GECKO_IDS = {
       BTC: "bitcoin", ETH: "ethereum", BNB: "binancecoin", SOL: "solana",
       MATIC: "matic-network", ADA: "cardano", DOT: "polkadot", AVAX: "avalanche-2",
@@ -2200,13 +2219,9 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
     const cryptoHoldings = pdata.holdings.filter((h) => GECKO_IDS[h.ticker]);
     if (cryptoHoldings.length > 0) {
       try {
-        const ids = [...new Set(cryptoHoldings.map((h) => GECKO_IDS[h.ticker])), "usd-coin"].join(",");
+        const ids = [...new Set(cryptoHoldings.map((h) => GECKO_IDS[h.ticker]))].join(",");
         const resp = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd,idr`);
         const prices = await resp.json();
-        if (prices["usd-coin"]?.idr) {
-          const rate = Math.round(prices["usd-coin"].idr);
-          if (rate > 10000) { const ts = Date.now(); setUsdIdr(rate); setRateTs(ts); localStorage.setItem("oreo:usdIdr:v2", JSON.stringify({ rate, ts })); }
-        }
         updated = updated.map((h) => {
           const geckoId = GECKO_IDS[h.ticker];
           if (!geckoId || !prices[geckoId]) return h;
@@ -2269,7 +2284,7 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
     }
 
     setPData({ holdings: updated });
-    showToast("Prices updated ✓");
+    showToast("Refreshed ✓");
     setPriceLoading(false);
   };
 
@@ -2348,8 +2363,8 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
       )}
 
       {/* Stats bar */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10 }}>
-        <Card style={{ padding: "10px 14px", flex: 1 }}>
+      <div style={{ marginBottom: 12 }}>
+        <Card style={{ padding: "10px 14px" }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
             {[
               { l: "Market value", v: fmtCompact(invValue), sub: `Cost ${fmtCompact(invCost)}` },
@@ -2364,13 +2379,6 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
             ))}
           </div>
         </Card>
-        {isDesktop && (
-          <button className="lg-btn" onClick={refreshPrices} disabled={priceLoading}
-            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, background: T.panel2, border: `1px solid ${T.line}`, color: priceLoading ? T.faint : T.sub, borderRadius: 11, padding: "9px 12px", cursor: priceLoading ? "not-allowed" : "pointer", fontSize: 11, fontFamily: T.body, flexShrink: 0 }}>
-            <RefreshCw size={14} style={priceLoading ? { animation: "spin .8s linear infinite" } : {}} />
-            {priceLoading ? "…" : "Refresh"}
-          </button>
-        )}
       </div>
 
       {/* Desktop: portfolio chart */}
@@ -2779,6 +2787,12 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
   const tabContent = tab === "dash" ? (isDesktop ? dashDesktop : dashMobile) : tab === "txn" ? activityContent : tab === "sub" ? subsContent : tab === "inv" ? investContent : settingsContent;
 
   const onboardingBanner = null;
+  const refreshBtn = (
+    <button onClick={refreshAll} disabled={priceLoading} className="lg-btn" title="Refresh prices & exchange rate"
+      style={{ background: "none", border: "none", cursor: priceLoading ? "not-allowed" : "pointer", padding: 4, display: "grid", placeItems: "center", borderRadius: 9, color: priceLoading ? T.faint : T.sub }}>
+      <RefreshCw size={18} style={priceLoading ? { animation: "spin .8s linear infinite" } : {}} />
+    </button>
+  );
   const addBtn = (
     <button className="lg-btn" onClick={() => setModal(tab === "sub" ? "sub" : tab === "inv" ? "hold" : "txn")}
       style={{ display: "flex", alignItems: "center", gap: 7, background: T.accent, border: "none", borderRadius: 12, padding: "10px 16px", cursor: "pointer", color: "#fff", fontWeight: 700, fontSize: 14, fontFamily: T.body, boxShadow: `0 4px 14px ${T.accent}45` }}>
@@ -2992,15 +3006,6 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
               {!PRIVATE && (() => {
                 const live = rateTs > 0;
                 const updatedAt = live ? new Date(rateTs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null;
-                const forceRefresh = async () => {
-                  try {
-                    localStorage.removeItem("oreo:usdIdr:v2");
-                    const res = await fetch("https://api.frankfurter.app/latest?from=USD&to=IDR");
-                    const data = await res.json();
-                    const rate = Math.round(data.rates.IDR);
-                    if (rate > 10000) { const ts = Date.now(); setUsdIdr(rate); setRateTs(ts); localStorage.setItem("oreo:usdIdr:v2", JSON.stringify({ rate, ts })); }
-                  } catch (_) {}
-                };
                 return (
                   <div style={{ padding: "4px 8px", marginTop: 2 }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -3009,7 +3014,7 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
                         <span style={{ fontSize: 10.5, fontFamily: T.mono, color: live ? T.sub : T.faint, letterSpacing: 0.2 }}>
                           = Rp {usdIdr.toLocaleString("id-ID")}
                         </span>
-                        <button onClick={forceRefresh} className="lg-btn" title="Refresh rate"
+                        <button onClick={refreshCurrency} className="lg-btn" title="Refresh rate"
                           style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: T.faint, display: "grid", placeItems: "center", borderRadius: 4 }}>
                           <RefreshCw size={9} />
                         </button>
@@ -3081,6 +3086,7 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
                 </div>
               )}
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: "auto", flexShrink: 0 }}>
+                {refreshBtn}
                 {bellEl}
                 {tab !== "settings" && addBtn}
               </div>
@@ -3103,6 +3109,7 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               {privacyToggle}
               {themeToggle}
+              {refreshBtn}
               {bellEl}
               <button onClick={() => setTab("settings")} className="lg-btn"
                 style={{ width: 34, height: 34, borderRadius: 10, border: `1px solid ${tab === "settings" ? T.accent : T.line}`, background: tab === "settings" ? `${T.accent}14` : T.panelSolid, cursor: "pointer", display: "grid", placeItems: "center", color: tab === "settings" ? T.accent : T.sub }}>
@@ -3121,7 +3128,7 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
               if (delta > 0) setPullDist(Math.min(delta * 0.55, 96));
             }}
             onTouchEnd={() => {
-              if (pullDist > 64 && !priceLoading) refreshPrices();
+              if (pullDist > 64 && !priceLoading) refreshAll();
               setPullDist(0);
             }}>
             {tabContent}
@@ -3170,7 +3177,10 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
           realizedByHolding={realizedByHolding}
           transactions={pdata.transactions}
           categories={pdata.categories || []}
+          holdings={pdata.holdings}
           onOpenTrade={(holding) => setEditing({ kind: "trade", item: holding })}
+          onEditTrade={(trade) => setEditing({ kind: "editTrade", item: trade })}
+          onEditHold={(holding) => setEditing({ kind: "hold", item: holding })}
           onClose={() => { setModal(null); setEditing(null); }}
           onDelete={editing ? () => {
             const { kind, item } = editing;
@@ -3178,18 +3188,35 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
             else if (kind === "sub") setPData({ subscriptions: pdata.subscriptions.filter((x) => x.id !== item.id) });
             else if (kind === "goal") setPData({ goals: (pdata.goals || []).filter((x) => x.id !== item.id) });
             else if (kind === "budget") setPData({ budgets: (pdata.budgets || []).filter((x) => x.id !== item.id) });
-            else if (kind === "invTxn") {
+            else if (kind === "editTrade") {
               // Delete a trade and reverse its effect on the holding
-              const trades = (pdata.investmentTransactions || []).filter((x) => x.id !== item.id);
               const h = pdata.holdings.find((x) => x.id === item.holdingId);
-              if (h && item.type === "buy") {
-                const newQty = Math.max(0, h.qty - item.qty);
-                const newAvg = newQty > 0 ? ((h.qty * h.avg) - (item.qty * item.price) - item.fees) / newQty : h.avg;
-                setPData({ investmentTransactions: trades, holdings: pdata.holdings.map((x) => x.id === h.id ? { ...x, qty: newQty, avg: Math.max(0, newAvg) } : x) });
-              } else {
-                setPData({ investmentTransactions: trades });
+              if (h) {
+                if (item.type === "buy") {
+                  const newQty = h.qty - item.qty;
+                  if (newQty < -1e-9) { showToast("Can't delete — later sells already depend on this buy"); return; }
+                  const newAvg = newQty > 1e-9 ? ((h.qty * h.avg) - (item.qty * item.price) - (item.fees || 0)) / newQty : h.avg;
+                  setPData({ holdings: pdata.holdings.map((x) => x.id === h.id ? { ...x, qty: +Math.max(0, newQty).toFixed(8), avg: +Math.max(0, newAvg).toFixed(2) } : x) });
+                } else if (item.type === "sell") {
+                  setPData({ holdings: pdata.holdings.map((x) => x.id === h.id ? { ...x, qty: +(h.qty + item.qty).toFixed(8) } : x) });
+                }
+                // dividend: no qty/avg change on the holding
               }
+              const trades = (pdata.investmentTransactions || []).filter((x) => x.id !== item.id);
+              const transactions = item.fundTxnId ? pdata.transactions.filter((t) => t.id !== item.fundTxnId) : pdata.transactions;
+              setPData({ investmentTransactions: trades, transactions });
               setEditing(null); showToast("Trade deleted ✓"); return;
+            }
+            else if (kind === "hold") {
+              // Delete a holding — cascade its trades and any linked funding expenses
+              const relatedTrades = (pdata.investmentTransactions || []).filter((x) => x.holdingId === item.id);
+              const fundTxnIds = new Set([item.fundTxnId, ...relatedTrades.map((t) => t.fundTxnId)].filter(Boolean));
+              setPData({
+                holdings: pdata.holdings.filter((x) => x.id !== item.id),
+                investmentTransactions: (pdata.investmentTransactions || []).filter((x) => x.holdingId !== item.id),
+                transactions: pdata.transactions.filter((x) => !fundTxnIds.has(x.id)),
+              });
+              setEditing(null); showToast("Holding deleted ✓"); return;
             }
             setUndoStack({ kind, item });
             setEditing(null);
@@ -3215,15 +3242,108 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
                 trade.realized = +(trade.price || 0);
                 trade.qty = 0;
               }
+              const { fundAcct, ...tradeClean } = trade;
+              const newTxns = [];
+              if (tradeClean.type === "buy" && fundAcct) {
+                const rate = h.ccy === "USD" ? USD_IDR : 1;
+                const cost = Math.round((tradeClean.qty * tradeClean.price + (tradeClean.fees || 0)) * rate);
+                const fundTxnId = "t" + Date.now();
+                newTxns.push({ id: fundTxnId, type: "expense", cat: "Investment", acct: fundAcct, note: `Buy ${h.ticker} (${h.platform})`, date: tradeClean.date || todayISO() , amount: cost });
+                tradeClean.fundTxnId = fundTxnId;
+              }
               setPData({
-                investmentTransactions: [...(pdata.investmentTransactions || []), trade],
+                investmentTransactions: [...(pdata.investmentTransactions || []), tradeClean],
                 holdings: pdata.holdings.map((x) => x.id === h.id ? updatedH : x),
+                transactions: [...newTxns, ...pdata.transactions],
               });
               setEditing({ kind: "holdDetail", item: updatedH });
               showToast("Trade logged ✓");
               return;
             }
-            if (editing && editing.kind !== "trade" && editing.kind !== "holdDetail") {
+            if (editing && editing.kind === "editTrade") {
+              // Correct a previously logged trade: undo its old effect on the holding, reapply the new numbers
+              const oldTrade = editing.item;
+              const h = pdata.holdings.find((x) => x.id === oldTrade.holdingId);
+              if (!h) { setEditing(null); return; }
+
+              let hR = { ...h };
+              if (oldTrade.type === "buy") {
+                const undoneQty = h.qty - oldTrade.qty;
+                const undoneAvg = undoneQty > 1e-9 ? ((h.qty * h.avg) - (oldTrade.qty * oldTrade.price) - (oldTrade.fees || 0)) / undoneQty : h.avg;
+                hR = { ...h, qty: +Math.max(0, undoneQty).toFixed(8), avg: +Math.max(0, undoneAvg).toFixed(2) };
+              } else if (oldTrade.type === "sell") {
+                hR = { ...h, qty: +(h.qty + oldTrade.qty).toFixed(8) };
+              }
+
+              const newTrade = { ...item, id: oldTrade.id, holdingId: h.id };
+              let updatedH = { ...hR };
+              if (newTrade.type === "buy") {
+                const newQty = hR.qty + newTrade.qty;
+                const newAvg = (hR.qty * hR.avg + newTrade.qty * newTrade.price + (newTrade.fees || 0)) / newQty;
+                updatedH = { ...hR, qty: +newQty.toFixed(8), avg: +newAvg.toFixed(2) };
+              } else if (newTrade.type === "sell") {
+                if (newTrade.qty > hR.qty + 1e-9) { showToast(`Can't sell ${newTrade.qty} — only ${hR.qty} would be held`); return; }
+                newTrade.realized = +(newTrade.qty * (newTrade.price - hR.avg) - (newTrade.fees || 0)).toFixed(2);
+                updatedH = { ...hR, qty: +Math.max(0, hR.qty - newTrade.qty).toFixed(8) };
+              } else if (newTrade.type === "dividend") {
+                newTrade.realized = +(newTrade.price || 0);
+                newTrade.qty = 0;
+              }
+
+              const { fundAcct, ...tradeClean } = newTrade;
+              let transactions = pdata.transactions;
+              if (tradeClean.type === "buy" && fundAcct) {
+                const rate = h.ccy === "USD" ? USD_IDR : 1;
+                const cost = Math.round((tradeClean.qty * tradeClean.price + (tradeClean.fees || 0)) * rate);
+                if (oldTrade.fundTxnId && pdata.transactions.some((t) => t.id === oldTrade.fundTxnId)) {
+                  transactions = pdata.transactions.map((t) => t.id === oldTrade.fundTxnId ? { ...t, acct: fundAcct, amount: cost, note: `Buy ${h.ticker} (${h.platform})`, date: tradeClean.date } : t);
+                  tradeClean.fundTxnId = oldTrade.fundTxnId;
+                } else {
+                  const fundTxnId = "t" + Date.now();
+                  transactions = [{ id: fundTxnId, type: "expense", cat: "Investment", acct: fundAcct, note: `Buy ${h.ticker} (${h.platform})`, date: tradeClean.date || todayISO(), amount: cost }, ...pdata.transactions];
+                  tradeClean.fundTxnId = fundTxnId;
+                }
+              } else if (oldTrade.fundTxnId) {
+                transactions = pdata.transactions.filter((t) => t.id !== oldTrade.fundTxnId);
+                tradeClean.fundTxnId = null;
+              }
+
+              setPData({
+                investmentTransactions: (pdata.investmentTransactions || []).map((x) => x.id === oldTrade.id ? tradeClean : x),
+                holdings: pdata.holdings.map((x) => x.id === h.id ? updatedH : x),
+                transactions,
+              });
+              setEditing({ kind: "holdDetail", item: updatedH });
+              showToast("Trade updated ✓");
+              return;
+            }
+            if (editing && editing.kind === "hold") {
+              // Correct a previously entered holding's numbers directly (no ticker+platform merge)
+              const oldH = editing.item;
+              const { fundAcct, ...holdClean } = item;
+              const rate = holdClean.ccy === "USD" ? USD_IDR : 1;
+              const cost = Math.round(holdClean.qty * holdClean.avg * rate);
+              let transactions = pdata.transactions;
+              if (fundAcct) {
+                if (oldH.fundTxnId && pdata.transactions.some((t) => t.id === oldH.fundTxnId)) {
+                  transactions = pdata.transactions.map((t) => t.id === oldH.fundTxnId ? { ...t, acct: fundAcct, amount: cost, note: `Buy ${holdClean.ticker} (${holdClean.platform})` } : t);
+                  holdClean.fundTxnId = oldH.fundTxnId;
+                } else {
+                  const fundTxnId = "t" + Date.now();
+                  transactions = [{ id: fundTxnId, type: "expense", cat: "Investment", acct: fundAcct, note: `Buy ${holdClean.ticker} (${holdClean.platform})`, date: todayISO(), amount: cost }, ...pdata.transactions];
+                  holdClean.fundTxnId = fundTxnId;
+                }
+              } else if (oldH.fundTxnId) {
+                transactions = pdata.transactions.filter((t) => t.id !== oldH.fundTxnId);
+                holdClean.fundTxnId = null;
+              }
+              const merged = { ...oldH, ...holdClean };
+              setPData({ holdings: pdata.holdings.map((h) => h.id === oldH.id ? merged : h), transactions });
+              setEditing(null);
+              showToast("Holding updated ✓");
+              return;
+            }
+            if (editing && editing.kind !== "trade" && editing.kind !== "holdDetail" && editing.kind !== "editTrade" && editing.kind !== "hold") {
               const merged = { ...editing.item, ...item };
               if (editing.kind === "txn") {
                 if (editing.editSeries && editing.item.recurring) {
@@ -3256,16 +3376,25 @@ Respond ONLY with valid JSON: {"summary":"answer","total":0,"breakdown":[{"cat":
               if (modal === "txn") setPData({ transactions: [{ ...item, id: "t" + Date.now() }, ...pdata.transactions] });
               if (modal === "sub") setPData({ subscriptions: [...pdata.subscriptions, { ...item, id: "s" + Date.now() }] });
               if (modal === "hold") {
+                const { fundAcct, ...holdClean } = item;
+                const newTxns = [];
+                if (fundAcct) {
+                  const rate = holdClean.ccy === "USD" ? USD_IDR : 1;
+                  const cost = Math.round(holdClean.qty * holdClean.avg * rate);
+                  const fundTxnId = "t" + Date.now();
+                  newTxns.push({ id: fundTxnId, type: "expense", cat: "Investment", acct: fundAcct, note: `Buy ${holdClean.ticker} (${holdClean.platform})`, date: todayISO(), amount: cost });
+                  holdClean.fundTxnId = fundTxnId;
+                }
                 const existing = pdata.holdings.find(
-                  (h) => h.ticker.toUpperCase() === item.ticker.toUpperCase() && h.platform === item.platform
+                  (h) => h.ticker.toUpperCase() === holdClean.ticker.toUpperCase() && h.platform === holdClean.platform
                 );
                 if (existing) {
-                  const newQty = existing.qty + item.qty;
-                  const newAvg = (existing.qty * existing.avg + item.qty * item.avg) / newQty;
-                  setPData({ holdings: pdata.holdings.map((h) => h.id === existing.id ? { ...h, qty: +newQty.toFixed(8), avg: +newAvg.toFixed(2), price: item.price } : h) });
-                  showToast(`Merged into existing ${item.ticker} position`);
+                  const newQty = existing.qty + holdClean.qty;
+                  const newAvg = (existing.qty * existing.avg + holdClean.qty * holdClean.avg) / newQty;
+                  setPData({ holdings: pdata.holdings.map((h) => h.id === existing.id ? { ...h, qty: +newQty.toFixed(8), avg: +newAvg.toFixed(2), price: holdClean.price } : h), transactions: [...newTxns, ...pdata.transactions] });
+                  showToast(`Merged into existing ${holdClean.ticker} position`);
                 } else {
-                  setPData({ holdings: [...pdata.holdings, { ...item, id: "h" + Date.now() }] });
+                  setPData({ holdings: [...pdata.holdings, { ...holdClean, id: "h" + Date.now() }], transactions: [...newTxns, ...pdata.transactions] });
                 }
               }
               if (modal === "goal") setPData({ goals: [...(pdata.goals || []), { ...item, id: "g" + Date.now() }] });

@@ -31,7 +31,7 @@ export function TxnRow({ t, full, onClick }) {
             {t.recurring && <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 6px", borderRadius: 5, background: `${T.gold}1c`, color: T.goldDeep, letterSpacing: 0.3, textTransform: "uppercase", flexShrink: 0 }}>↻ {t.recurring}</span>}
           </div>
           <div style={{ fontSize: 11, color: T.faint, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {isTransfer ? `${t.acct} → ${t.toAcct || "?"}` : `${t.cat} · ${t.acct}`}{full ? " · " + t.date : ""}
+            {isTransfer ? `${t.acct} → ${t.toAcct || "?"}` : `${t.cat} · ${t.acct}`}{isTransfer && t.fee > 0 ? ` · fee ${fmtDisp(t.fee)}` : ""}{full ? " · " + t.date : ""}
           </div>
         </div>
       </div>
